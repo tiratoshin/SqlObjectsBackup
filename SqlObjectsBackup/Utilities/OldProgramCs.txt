@@ -1,0 +1,286 @@
+using Microsoft.Data.SqlClient;
+using NLog;
+using Microsoft.Extensions.Configuration;
+using SqlObjectsBackup.Models;
+using Newtonsoft.Json;
+using SqlObjectsBackup;
+
+using System.CommandLine;
+using System.CommandLine.Invocation;
+using System.CommandLine.NamingConventionBinder;
+
+
+class Program
+{
+    private static Logger logger = LogManager.GetCurrentClassLogger();
+    static List<string> modifiedFiles = new List<string>();
+    static List<string> matchingStoredProcedures = new List<string>();
+    static List<string> matchingTables = new List<string>();
+    static List<string> matchingViews = new List<string>();
+    static List<string> matchingTriggers = new List<string>();
+    static List<string> matchingFunctions = new List<string>();
+
+
+    static void Main(string[] args)
+    {
+        var builder = new ConfigurationBuilder()
+            .SetBasePath(Directory.GetCurrentDirectory())
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+        var configuration = builder.Build();
+
+        var rootCommand = new RootCommand
+        {
+            new Option<string>(
+                "--local-git-dir",
+                getDefaultValue: () => configuration["GitSettings:RepoPath"],
+                description: "The path to the local directory where the Git repository is located."),
+            new Option<string>(
+                "--connection-string",
+                getDefaultValue: () => configuration["DatabaseSettings:ConnectionString"],
+                description: "The connection string to the SQL Server database."),
+            new Option<string>(
+                "--branch",
+                getDefaultValue: () => configuration["GitSettings:Branch"],
+                description: "The name of the Git branch to use."),
+            new Option<string>(
+                "--repo",
+                getDefaultValue: () => configuration["GitSettings:Repo"],
+                description: "The URL of the Git repository.")
+        };
+
+        rootCommand.Description = "A command-line tool for backing up SQL objects.";
+
+        rootCommand.Handler = CommandHandler.Create<string, string, string, string>((repoPath, connectionString, branch, repo) =>
+        {
+            var builder1 = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+            IConfigurationRoot configuration1 = builder1.Build();
+
+            var gitSettings = configuration1.GetSection("GitSettings").Get<GitSettings>();
+            var dbSettings = configuration1.GetSection("DatabaseSettings").Get<DatabaseSettings>();
+            gitSettings.RepoPath = repoPath ?? gitSettings.RepoPath;
+            dbSettings.ConnectionString = connectionString ?? dbSettings.ConnectionString;
+            gitSettings.Branch = branch ?? gitSettings.Branch;
+            gitSettings.Repo = repo ?? gitSettings.Repo;
+
+            try
+            {
+                // Load configuration settings from appsettings.json file
+                IConfigurationBuilder? builder2 = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true);
+                IConfigurationRoot configuration2 = builder2.Build();
+
+                // Get Git, database, and parallelism settings from configuration
+                GitSettings? gitSettings2 = configuration2.GetSection("GitSettings").Get<GitSettings>();
+                DatabaseSettings? dbSettings2 = configuration2.GetSection("DatabaseSettings").Get<DatabaseSettings>();
+                ParallelismSettings? parallelismSettings = configuration2.GetSection("ParallelismSettings").Get<ParallelismSettings>();
+
+                // Override Git settings with command-line arguments, if provided
+                if (args.Length > 0) gitSettings.RepoPath = args[0];
+                if (args.Length > 1) dbSettings.ConnectionString = args[1];
+                if (args.Length > 2) gitSettings.Branch = args[2];
+                if (args.Length > 3) gitSettings.Repo = args[3];
+                if (args.Length > 4) gitSettings.LikePattern = args[4];
+                if (args.Length > 5) gitSettings.LogFilePath = args[5];
+
+                // Configure NLog after processing command-line arguments
+                NLogClass.ConfigureNLog(gitSettings.LogFilePath);
+
+                // Check if the essential arguments are provided
+                if (string.IsNullOrEmpty(gitSettings.RepoPath) || string.IsNullOrEmpty(dbSettings.ConnectionString) || string.IsNullOrEmpty(gitSettings.Branch) || string.IsNullOrEmpty(gitSettings.Repo))
+                {
+                    Console.WriteLine("Error: Missing essential arguments.");
+                    Help.DisplayHelp();
+                    return;
+                }
+
+                // Display Git settings to console
+                Console.WriteLine($"Using Git repository at: {gitSettings.RepoPath}");
+                Console.WriteLine(JsonConvert.SerializeObject(gitSettings, Formatting.Indented));
+
+                // Log start of script
+                Console.WriteLine("Script started...");
+                logger.Info("Script started...");
+
+                // Connect to SQL Server
+                using (SqlConnection connection = new SqlConnection(dbSettings.ConnectionString))
+                {
+                    try
+                    {
+                        connection.Open();
+                        Console.WriteLine("Connected to SQL Server");
+                        Console.WriteLine("Getting matching SQL objects...");
+
+                        // Get matching SQL objects based on the likePattern
+                        matchingStoredProcedures = SqlStoredProcedures.GetMatchingStoredProcedures(connection, gitSettings.LikePattern);
+                        //Console.WriteLine($"Found {matchingStoredProcedures.Count} stored procedures that match the criteria.");
+
+                        matchingTables = SqlTables.GetMatchingTables(connection, gitSettings.LikePattern);
+                        //Console.WriteLine($"Found {matchingTables.Count} tables that match the criteria.");
+
+                        matchingViews = SqlViews.GetMatchingViews(connection, gitSettings.LikePattern);
+                        //Console.WriteLine($"Found {matchingViews.Count} views that match the criteria.");
+
+                        matchingTriggers = Sqltriggers.GetMatchingTriggers(connection, gitSettings.LikePattern);
+                        //Console.WriteLine($"Found {matchingTriggers.Count} triggers that match the criteria.");
+
+                        matchingFunctions = SqlFunctions.GetMatchingFunctions(connection, gitSettings.LikePattern);
+                        //Console.WriteLine($"Found {matchingFunctions.Count} functions that match the criteria.");
+
+                        // Generate and save backup table scripts
+                        Console.WriteLine("Backup tables checking/creating path...");
+                        logger.Info("Backup tables checking/creating path...");
+                        var backupTablesDirectory = Path.Combine(gitSettings.RepoPath, "Tables");
+                        if (!Directory.Exists(backupTablesDirectory))
+                        {
+                            Directory.CreateDirectory(backupTablesDirectory);
+                        }
+                    }
+                    catch (SqlException ex)
+                    {
+                        Console.WriteLine("Error connecting to SQL Server: " + ex.Message);
+                        logger.Error(ex, "Error connecting to SQL Server.");
+                        return; // Exit the program as a connection is essential
+                    }
+
+                    // Get and save SQL objects in parallel
+                    Console.WriteLine("Getting and saving SQL objects...");
+                    int calculatedParallelism = Math.Min(parallelismSettings.MaxDegreeOfParallelism, Environment.ProcessorCount - 1);
+                    var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(calculatedParallelism, 1) };
+                    var sqlObjectTypes = new Dictionary<string, Func<SqlConnection, string, Dictionary<string, string>>>
+                {
+                    {"Stored_Procedure", GetStoredProcedures},
+                    {"Function", GetFunctions},
+                    {"Trigger", GetTriggers},
+                    {"View", GetViews},
+                    {"Table", (conn, pattern) => GetTables(conn, pattern, matchingTables)}
+                };
+                    var folderPaths = new Dictionary<string, string>
+                {
+                    {"Stored_Procedure", Path.Combine(gitSettings.RepoPath, "StoredProcedures")},
+                    {"Function", Path.Combine(gitSettings.RepoPath, "Functions")},
+                    {"Trigger", Path.Combine(gitSettings.RepoPath, "Triggers")},
+                    {"View", Path.Combine(gitSettings.RepoPath, "Views")},
+                    {"Table", Path.Combine(gitSettings.RepoPath, "Tables")}
+                };
+                    Console.WriteLine("Starting to loop through object types...");
+                    Console.WriteLine($"Number of items in sqlObjectTypes: {sqlObjectTypes.Count}");
+                    foreach (var objectType in sqlObjectTypes.Keys)
+                    {
+                        if (objectType == "Function")
+                        {
+                            Console.WriteLine($"Working on '{objectType}'");
+                            var objectTexts = sqlObjectTypes[objectType](connection, gitSettings.LikePattern);
+                            var folderPath = folderPaths[objectType];
+
+                            Console.WriteLine($"Found {objectTexts.Count} {objectType}(s).");
+
+                            if (!Directory.Exists(folderPath))
+                            {
+                                Directory.CreateDirectory(folderPath);
+                                Console.WriteLine($"Created folder: {folderPath}");
+                            }
+
+                            // Write files in parallel
+                            Console.WriteLine($"Number of items in objectTexts: {objectTexts.Count}");
+                            try
+                            {
+                                Console.WriteLine("Starting Parallel.ForEach...");
+                                Parallel.ForEach(objectTexts, parallelOptions, kvp =>
+                                {
+                                    string objectName = kvp.Key;
+                                    string objectText = kvp.Value;
+
+                                    string scriptFilePath = Path.Combine(folderPath, $"{objectName}.sql");
+                                    Console.WriteLine($"Checking: {objectName}");
+
+                                    // Read existing content if the file exists
+                                    string existingContent = File.Exists(scriptFilePath) ? File.ReadAllText(scriptFilePath) : string.Empty;
+
+                                    // If content has changed, update the file and add to the list of modified files
+                                    if (existingContent != objectText)
+                                    {
+                                        Console.WriteLine($"Modifying: {objectName}");
+                                        try
+                                        {
+                                            Console.WriteLine($"Starting to write file: {objectName}");  // Log the start of the file write
+                                            logger.Info($"Starting to write file: {objectName}");  // Log the start of the file write
+
+                                            File.WriteAllText(scriptFilePath, objectText);
+                                            Console.WriteLine($"Finished writing file: {objectName}");  // Log the end of the file write
+                                            logger.Info($"Finished writing file: {objectName}");  // Log the end of the file write
+                                            modifiedFiles.Add(scriptFilePath);
+                                        }
+                                        catch (IOException ex)
+                                        {
+                                            Console.WriteLine("File I/O Error: " + ex.Message);
+                                            logger.Error(ex, "File I/O Error.");
+                                        }
+                                    }
+                                });
+                                Console.WriteLine("Finished Parallel.ForEach...");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine("Error: " + ex.Message);
+                            }
+                        }
+                    }
+
+                    // Push changes to Git
+                    Git git = new Git(logger);
+                    git.PushToGit(gitSettings.RepoPath, gitSettings.Branch, modifiedFiles);
+                }
+
+                // Log end of script
+                Console.WriteLine("Script ended...");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error: " + ex.Message);
+                logger.Error(ex, "Error during script execution.");
+            }
+        });
+        // Invoke the command
+        rootCommand.InvokeAsync(args).Wait();
+    }
+
+
+
+    static Dictionary<string, string> GetStoredProcedures(SqlConnection connection, string likePattern)
+    {
+        Console.WriteLine("Getting stored procedures...");
+        logger.Info("Getting stored procedures...");
+        return SqlObjectScripter.GetSqlObjectsUsingSMO(connection, "StoredProcedure", likePattern, matchingStoredProcedures);
+    }
+
+    static Dictionary<string, string> GetFunctions(SqlConnection connection, string likePattern)
+    {
+        Console.WriteLine("Getting functions...");
+        logger.Info("Getting functions...");
+        return SqlObjectScripter.GetSqlObjectsUsingSMO(connection, "Function", likePattern, matchingFunctions);
+    }
+
+    static Dictionary<string, string> GetTriggers(SqlConnection connection, string likePattern)
+    {
+        Console.WriteLine("Getting triggers...");
+        logger.Info("Getting triggers...");
+        return SqlObjectScripter.GetSqlObjectsUsingSMO(connection, "Trigger", likePattern, matchingTriggers);
+    }
+
+    static Dictionary<string, string> GetViews(SqlConnection connection, string likePattern)
+    {
+        Console.WriteLine("Getting views...");
+        logger.Info("Getting views...");
+        return SqlObjectScripter.GetSqlObjectsUsingSMO(connection, "View", likePattern, matchingViews);
+    }
+
+    static Dictionary<string, string> GetTables(SqlConnection connection, string likePattern, List<string> matchingTables)
+    {
+        Console.WriteLine("Getting tables...");
+        logger.Info("Getting tables...");
+        return SqlObjectScripter.GetSqlObjectsUsingSMO(connection, "Table", likePattern, matchingTables);
+    }
+}

@@ -1,0 +1,24 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": ".NET Core Launch (console)",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/SqlObjectsBackup/bin/Debug/net8.0/win-x64/SqlObjectsBackup.dll",
+            // "args": ["--local-git-dir", "\\\\folderpath\\git\\folder", "--connection-string", "Server=server;Database=database;Trusted_Connection=True;Encrypt=False;TrustServerCertificate=True;MultipleActiveResultSets=True;", "--branch", "nightly", "--repo", "https://github.com/location/repo.git", "--log-file-path", "\\\\folder\\git\\\\folder\\\\logs"],
+            "cwd": "${workspaceFolder}/SqlObjectsBackup",
+            "console": "internalConsole",
+            "stopAtEntry": false
+        },
+        {
+            "name": ".NET Core Attach",
+            "type": "coreclr",
+            "request": "attach"
+        }
+    ]
+}

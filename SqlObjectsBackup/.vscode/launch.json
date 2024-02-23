@@ -1,0 +1,20 @@
+{
+    "configurations": [
+        {
+            "name": "C#: SqlObjectsBackup",
+            "type": "dotnet",
+            "request": "launch",
+            "projectPath": "${workspaceFolder}\\SqlObjectsBackup.csproj",
+            "launchConfigurationId": "TargetFramework=;SqlObjectsBackup",
+            "args": [
+                "--local-git-dir", "\\\\192.168.3.20\\git\\testclone\\zpass", 
+                "--connection-string", "Server=SqlServer;Database=Database;Trusted_Connection=True;Encrypt=False;TrustServerCertificate=True;MultipleActiveResultSets=True;", 
+                "--branch", "nightly", 
+                "--repo", "https://github.com/Path/path/to/repo.git",
+                "--like-pattern", "MatchingPattern",
+                "--log-file-path", "\\\\folderlocation\\git\\\\testclone\\\\folder\\log",
+                "--max-degree-of-parallelism", "10"
+            ]
+        }
+    ]
+}
