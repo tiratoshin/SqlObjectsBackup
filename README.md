@@ -7,7 +7,7 @@ The goal for this is to save these to a local git repo and then push them to a r
 
 
 ## Commandline inputs
-By default the program will check for the application.json file and use the settings in there. If you want to override the settings in the application.json file you can use the following commandline inputs.
+By default the program will check for the appsettings.json file and use the settings in there. If you want to override the settings in the application.json file you can use the following commandline inputs.
 
 <!-- commandline inputs table -->
 
